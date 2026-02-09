@@ -1,4 +1,4 @@
-# peakfit_4.py (You can not only input peak height and FWHM in this code but also your denominator area is not the area of the fitted curve it's coming from the total area of the raw curve.) 
+# peakfit_5.py (You can not only input peak height and FWHM in this code but also your denominator area is not the area of the fitted curve it's coming from the total area of the raw curve. Also peakfit_4 was designed around 2theta data but this one is designed for data in q.) 
 
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class FitConfig:
     q0_half_window: float = 0.00005
     w_init: float = 0.012
     eta_init: float = 0.4
-    w_min: float = 0.003
+    w_min: float = 0.000003
     w_max: float = 0.1
 
 
@@ -97,31 +97,52 @@ def model(q: np.ndarray, peak_positions: Tuple[float, ...], *p: float) -> np.nda
 # -----------------------------
 # Data
 # -----------------------------
+
 def load_and_preprocess(cfg: FitConfig):
-    df = pd.read_csv(cfg.file, sep=r"\s+")
-    theta = np.deg2rad(df["2theta"].values / 2)
-    q = (4 * np.pi / cfg.wavelength) * np.sin(theta)
+    df = pd.read_csv(cfg.file, sep=r"\s+", comment="#").dropna()
 
-    I_raw = df["I_raw"].values
-    I_bg = df["I_AmpBg"].values
-    I_sub = I_raw - I_bg
+    # ---- X axis: prefer 'q' column if it exists; else assume first column is 2theta ----
+    if "q" in df.columns:
+        q = df["q"].to_numpy(float)
+    else:
+        # positional: first column
+        x0 = df.iloc[:, 0].to_numpy(float)
+        # assume it's 2theta (deg) -> convert to q
+        theta = np.deg2rad(x0 / 2.0)
+        q = (4 * np.pi / cfg.wavelength) * np.sin(theta)
 
+    # ---- Y columns by position ----
+    if df.shape[1] < 3:
+        raise ValueError("Need at least 3 columns: x, I_raw (col2), I_bg (col3).")
+
+    I_raw = df.iloc[:, 1].to_numpy(float)  # 2nd column
+    I_bg  = df.iloc[:, 2].to_numpy(float)  # 3rd column
+
+    if df.shape[1] >= 4:
+        I_sub = df.iloc[:, 3].to_numpy(float)  # 4th column (already subtracted)
+    else:
+        I_sub = I_raw - I_bg
+
+    # ---- fit window in q ----
     mask = (q >= cfg.qmin) & (q <= cfg.qmax)
     q_fit, I_raw_fit, I_bg_fit, I_sub_fit = q[mask], I_raw[mask], I_bg[mask], I_sub[mask]
 
+    # sort by q
     idx = np.argsort(q_fit)
     q_fit, I_raw_fit, I_bg_fit, I_sub_fit = q_fit[idx], I_raw_fit[idx], I_bg_fit[idx], I_sub_fit[idx]
 
-    sigma = df["y_er"].values[mask][idx] if "y_er" in df.columns else None
-# ---- sanitize error bars ----
-    if sigma is not None:
+    # ---- optional error bars: if there is a 5th column, treat as sigma ----
+    sigma = None
+    if df.shape[1] >= 5:
+        sigma = df.iloc[:, 4].to_numpy(float)[mask][idx]
+        # sanitize
         pos = sigma > 0
         if np.any(pos):
             sigma_min = np.percentile(sigma[pos], 5)
             sigma = np.clip(sigma, sigma_min, None)
         else:
-            sigma = None  # fallback: all invalid
-    
+            sigma = None
+
     return df, q_fit, I_raw_fit, I_bg_fit, I_sub_fit, sigma
 
 # -----------------------------
@@ -476,7 +497,7 @@ def make_figure(res: Dict[str, Any], cfg: FitConfig) -> go.Figure:
         margin=dict(l=80, r=40, t=20, b=80),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        legend=dict(x=0.75, y=0.97, bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)", borderwidth=0),
+        legend=dict(x=0.5, y=0.97, bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)", borderwidth=0),
         legend_font=dict(size=28, family="Arial Black", color="black"))
     
     fig.update_xaxes(title=dict(text = "q (Å⁻¹)",font=AXIS_TITLE_FONT), tickfont=AXIS_TICK_FONT, showline=True, mirror=True, 
