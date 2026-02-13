@@ -25,6 +25,7 @@ AXIS_TICK_FONT  = dict(size=28, family="Arial Black", color="black")
 class FitConfig:
     file: str
     save_output: bool = True
+    sample_label: Optional[str] = None
 
     wavelength: float = 0.7863
     qmin: float = 0.08
@@ -52,11 +53,11 @@ class FitConfig:
     peak_colors: Optional[Dict[float, str]] = None
 
     # Peak init / bounds
-    q0_half_window: float = 0.00005
+    q0_half_window: float = 0.0001
     w_init: float = 0.012
     eta_init: float = 0.4
     w_min: float = 0.000003
-    w_max: float = 0.1
+    w_max: float = 0.5
 
 
 # -----------------------------
@@ -64,11 +65,13 @@ class FitConfig:
 # -----------------------------
 def make_output_dirs(file: str) -> Tuple[Path, Path, Path]:
     data_path = Path(file).resolve()
-    tables_folder = data_path.parent / "tables"
-    plots_folder = data_path.parent / "plots"
-    tables_folder.mkdir(exist_ok=True)
-    plots_folder.mkdir(exist_ok=True)
+    output_path = Path("Your_OutPut_Path").expanduser().resolve()
+    tables_folder = output_path / "tables"
+    plots_folder = output_path / "plots"
+    tables_folder.mkdir(parents=True, exist_ok=True)
+    plots_folder.mkdir(parents=True, exist_ok=True)
     return data_path, tables_folder, plots_folder
+
 
 
 # -----------------------------
@@ -257,8 +260,9 @@ def evaluate_curves(q_fit: np.ndarray,
 
     I_bg_dense  = bg_interp(q_dense)
     I_raw_dense = raw_interp(q_dense)
+    I_sub_dense = I_raw_dense - I_bg_dense
 
-    return q_dense, pv_curves, I_fit_total, bg_interp, I_bg_dense, I_raw_dense
+    return q_dense, pv_curves, I_fit_total, bg_interp, I_bg_dense, I_raw_dense, I_sub_dense
 
 
 # -----------------------------
@@ -292,7 +296,7 @@ def compute_global_totals(
     q_dense: np.ndarray,
     pv_curves: List[np.ndarray],
     I_bg_dense: np.ndarray,
-    I_raw_dense: np.ndarray,
+    I_sub_dense: np.ndarray,
     windows: Dict[float, Tuple[float, float]],
     denom_mode: str = "full",   # "full" or "union"
 ):
@@ -310,14 +314,13 @@ def compute_global_totals(
 
     I_cry_u = np.sum([c[win] for c in pv_curves], axis=0)
     I_bg_u  = I_bg_dense[win]
-    I_raw_u = I_raw_dense[win]
+    I_sub_u = I_sub_dense[win]
 
     Q_cry_total = np.trapz(I_cry_u * q_u**2, q_u)
     Q_bg_total  = np.trapz(I_bg_u  * q_u**2, q_u)
-    Q_raw_total = np.trapz(I_raw_u * q_u**2, q_u)
+    Q_sub_total = np.trapz(I_sub_u * q_u**2, q_u)
 
-    return win, Q_cry_total, Q_bg_total, Q_raw_total
-
+    return win, Q_cry_total, Q_bg_total, Q_sub_total
 # -----------------------------
 # Metrics
 # -----------------------------
@@ -352,7 +355,7 @@ def build_peak_table(
     q_dense: np.ndarray,
     pv_curves: List[np.ndarray],
     I_bg_dense: np.ndarray,
-    I_raw_dense: np.ndarray,
+    I_sub_dense: np.ndarray,   # <-- replace I_raw_dense
     windows: Dict[float, Tuple[float, float]],
     cfg: FitConfig,
 ) -> pd.DataFrame:
@@ -360,8 +363,11 @@ def build_peak_table(
     K = 0.94
     rows = []
 
-    _, Q_cry_total, Q_bg_total, Q_raw_total = compute_global_totals(
-    q_dense, pv_curves, I_bg_dense, I_raw_dense, windows, denom_mode="full")
+    _, Q_cry_total, Q_bg_total, Q_sub_total = compute_global_totals(
+    q_dense, pv_curves, I_bg_dense, I_sub_dense, windows, denom_mode="full")
+
+    
+    
     
     for i, q0_key in enumerate(cfg.peak_positions):
         A, q0_fit, w, eta = get_peak_params(popt, i)
@@ -382,9 +388,9 @@ def build_peak_table(
             i, q0_key, q_dense, pv_curves, I_bg_dense, windows
         )
 
-        # ✅ denominator is RAW union integral
-        pct_peak_over_raw = 100 * Q_cry / Q_raw_total if Q_raw_total > 0 else np.nan
-
+        # ✅ denominator is SUB global integral (q²-weighted)
+        pct_peak_over_sub = 100 * Q_cry / Q_sub_total if Q_sub_total > 0 else np.nan
+        
         rows.append({
             "q0_key (Å⁻¹)": q0_key,
             "q0_fit (Å⁻¹)": q0_fit,
@@ -396,9 +402,10 @@ def build_peak_table(
             "Crystal Size L (Å)": L,
 
             "Q_crystal_peak (a.u.)": Q_cry,
-            "% Peak / RAW (global q²)": pct_peak_over_raw,
-
-            "Q_raw_all (a.u.)": Q_raw_total,
+            # ✅ denominator is SUB global integral
+            "% Peak / SUB (global q²)": pct_peak_over_sub,
+            
+            "Q_sub_all (a.u.)": Q_sub_total,
             "Q_bg_all (a.u.)": Q_bg_total,
             "Q_crystal_all (a.u.)": Q_cry_total,
 
@@ -420,8 +427,8 @@ def build_peak_table(
         "FWHM Γ (rad)": 4,
         "Crystal Size L (Å)": 1,
         "Q_crystal_peak (a.u.)": 4,
-        "% Peak / RAW (global q²)": 2,
-        "Q_raw_all (a.u.)": 4,
+        "% Peak / SUB (global q²)": 2,
+        "Q_sub_all (a.u.)": 4,
         "Q_bg_all (a.u.)": 4,
         "Q_crystal_all (a.u.)": 4,
         "BG q_lo (Å⁻¹)": 4,
@@ -454,11 +461,11 @@ def make_figure(res: Dict[str, Any], cfg: FitConfig) -> go.Figure:
     bg_interp = interp1d(q_fit, I_bg_fit, bounds_error=False, fill_value="extrapolate")
 
     fig = go.Figure()
-    sample_name = Path(cfg.file).stem.replace("_AmpBGkrtd", "")
+    sample_name = cfg.sample_label or Path(cfg.file).stem.replace("_AmpBGkrtd", "")
 
-    fig.add_trace(go.Scatter(x=q_fit, y=I_raw_fit, name=sample_name, line=dict(color="black", width=4)))
+    fig.add_trace(go.Scatter(x=q_fit, y=I_raw_fit, name=sample_name, line=dict(color="rgba(160,160,160,0.65)", width=4)))
     fig.add_trace(go.Scatter(x=q_fit, y=I_bg_fit, name="I_bg", line=dict(color="gray", width=4, dash="dash")))
-    fig.add_trace(go.Scatter(x=q_fit, y=I_sub_fit, name="I_sub", line=dict(color="red", width=4)))
+    fig.add_trace(go.Scatter(x=q_fit, y=I_sub_fit, name="I_sub", line=dict(color="#000080", width=4)))
 
     fig.add_trace(go.Scatter(
         x=np.concatenate([q_fit, q_fit[::-1]]),
@@ -471,7 +478,7 @@ def make_figure(res: Dict[str, Any], cfg: FitConfig) -> go.Figure:
 
     peak_colors = cfg.peak_colors or {}
     for curve, q0_key in zip(pv_curves, cfg.peak_positions):
-        fill = peak_colors.get(q0_key, "rgba(180,180,180,0.35)")
+        fill = peak_colors.get(q0_key, "rgba(190,200,215,0.25)")
         line_col = fill.replace("0.35", "1.0").replace("0.45", "1.0")
         fig.add_trace(go.Scatter(x=q_dense, y=curve, mode="lines",
                                  line=dict(width=3, color=line_col), showlegend=False))
@@ -485,7 +492,7 @@ def make_figure(res: Dict[str, Any], cfg: FitConfig) -> go.Figure:
         ))
 
     fig.add_trace(go.Scatter(x=q_dense, y=I_fit_total, name="Total Fit",
-                             line=dict(color="royalblue", width=4, dash="dot")))
+                             line=dict(color="#E69F00", width=4, dash="dot")))
 
     for q0_key, (q_lo, q_hi) in windows.items():
         col = peak_colors.get(q0_key, "rgba(180,180,180,0.8)").replace("0.35", "1.0").replace("0.45", "1.0")
@@ -497,11 +504,11 @@ def make_figure(res: Dict[str, Any], cfg: FitConfig) -> go.Figure:
         margin=dict(l=80, r=40, t=20, b=80),
         plot_bgcolor="rgba(0,0,0,0)",
         paper_bgcolor="rgba(0,0,0,0)",
-        legend=dict(x=0.5, y=0.97, bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)", borderwidth=0),
+        legend=dict(x=0.75, y=0.97, bgcolor="rgba(0,0,0,0)", bordercolor="rgba(0,0,0,0)", borderwidth=0),
         legend_font=dict(size=28, family="Arial Black", color="black"))
     
     fig.update_xaxes(title=dict(text = "q (Å⁻¹)",font=AXIS_TITLE_FONT), tickfont=AXIS_TICK_FONT, showline=True, mirror=True, 
-                                   linecolor="black", linewidth=3, dtick=0.03)
+                                   linecolor="black", linewidth=3,) #dtick=0.03
     fig.update_yaxes(title=dict(text="Intensity (a.u.)", font=AXIS_TITLE_FONT), tickfont=AXIS_TICK_FONT, showline=True,  
                      mirror=True, linecolor="black", linewidth=3, range=[0, y_max])
 
@@ -514,16 +521,15 @@ def run(cfg: FitConfig) -> Dict[str, Any]:
 
     df, q_fit, I_raw_fit, I_bg_fit, I_sub_fit, sigma = load_and_preprocess(cfg)
     popt, pcov = fit_peaks(q_fit, I_sub_fit, sigma, cfg)
-    q_dense, pv_curves, I_fit_total, bg_interp, I_bg_dense, I_raw_dense = evaluate_curves(q_fit, I_raw_fit,
-                                                                                          I_bg_fit, popt, cfg)
-    windows = build_windows(q_dense, pv_curves, cfg)
-    table = build_peak_table(popt, q_dense, pv_curves, I_bg_dense, I_raw_dense, windows, cfg)
-    if cfg.save_output:
-        out_path = tables_folder / data_path.with_suffix(".csv").name
-        table.to_csv(out_path, index=False)
-        #print(f"\n✅ Table saved to:\n{out_path}")
 
-    return {
+    q_dense, pv_curves, I_fit_total, bg_interp, I_bg_dense, I_raw_dense, I_sub_dense = evaluate_curves(
+        q_fit, I_raw_fit, I_bg_fit, popt, cfg
+    )
+
+    windows = build_windows(q_dense, pv_curves, cfg)
+    table = build_peak_table(popt, q_dense, pv_curves, I_bg_dense, I_sub_dense, windows, cfg)
+    # build result dict first (so make_figure can use it)
+    res = {
         "df": df,
         "q_fit": q_fit, "I_raw_fit": I_raw_fit, "I_bg_fit": I_bg_fit, "I_sub_fit": I_sub_fit,
         "sigma": sigma,
@@ -534,5 +540,17 @@ def run(cfg: FitConfig) -> Dict[str, Any]:
         "table": table,
         "data_path": data_path,
         "I_raw_dense": I_raw_dense,
+        "plots_folder": plots_folder,
+        "tables_folder": tables_folder,
+        "I_sub_dense": I_sub_dense,
     }
 
+    # save outputs only if requested
+    if cfg.save_output:
+        out_csv = tables_folder / f"{data_path.stem}.csv"
+        table.to_csv(out_csv, index=False)
+
+        fig = make_figure(res, cfg)  # needs kaleido for PNG
+        fig.write_image(plots_folder / f"{data_path.stem}.png", scale=2)
+
+    return res
